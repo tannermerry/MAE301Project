@@ -1,0 +1,406 @@
+import os, sys, time, datetime, json, random
+import numpy as np
+from keras.models import Sequential
+from keras.layers.core import Dense, Activation
+from keras.optimizers import SGD , Adam, RMSprop
+from keras.layers.advanced_activations import PReLU
+import matplotlib.pyplot as plt
+%matplotlib inline
+
+k = 4 # this is the factor mu for the different speed in water
+
+# Create the space using deductions for each space in the 400 by 400 grid
+#    Note there is a greater deduction in the water, because it takes more
+#    time to move in the water
+space = np.concatenate(((-k)*np.ones((100,50)),(-1)*np.ones((100,50))),axis=1)
+
+# We want to illustrate the spots that we visit vs the spot that we are at
+visited_space = 0.3 # value of grey to mark space
+cursor_space = 0.5 # value of grey of the current space
+
+# Define the possible actions
+LEFT = 0
+UP = 1
+RIGHT = 2
+DOWN = 3
+DOWNLEFT = 4
+UPLEFT = 5
+UPRIGHT = 6
+DOWNRIGHT = 7
+
+
+# Create a dictionary for the possible actions
+actions_dict = {
+    LEFT: 'left',
+    UP: 'up',
+    RIGHT: 'right',
+    DOWN: 'down',
+    DOWNLEFT: 'down-left',
+    UPLEFT: 'up-left',
+    UPRIGHT: 'up-right',
+    DOWNRIGHT: 'down-right',
+}
+
+# number of defined actions
+num_actions = len(actions_dict)
+
+# Starting exploration factor
+epsilon = 0.1
+
+class Qspace:
+    def __init__(self, space, cursor = (0,0)): # Note that we start at 100,100
+        self._space = np.array(space)
+        nrows, ncols = self._space.shape
+        self.target = ((nrows-1, ncols-1)) # Here is the point we are trying to get to
+        self.free_cells = [(r,c) for r in range(nrows) for c in range(ncols) if self._space[r,c] != 0.0]
+        self.free_cells.remove(self.target)
+        if self._space[self.target] == 0.0:
+            raise Expection("Invalid Space: target space is blocked!")
+        self.reset(cursor)
+        
+    def reset(self, cursor):
+        self.cursor = cursor
+        self.space = np.copy(self._space)
+        nrows, ncols = self.space.shape
+        row, col = cursor
+        self.space[row, col] = cursor_space
+        self.state = (row, col, 'start')
+        self.min_reward =  (-k)*self.space.size
+        self.total_reward = 0
+        self.visited = set()
+        
+    def update_state(self, action):
+        nrows, ncols = self.space.shape
+        nrow, ncol, nmode = cursor_row, cursor_col, mode = self.state
+        
+        if self.space[cursor_row, cursor_col] < 0.0:
+            self.visited.add((cursor_row,cursor_col))
+            
+        valid_actions = self.valid_actions()
+        
+        if not valid_actions:
+            nmode = 'blocked'
+        elif action in valid_actions:
+            nmode = 'valid'
+            if action == LEFT:
+                ncol -= 1
+            elif action == UP:
+                nrow -= 1
+            if action == RIGHT:
+                ncol += 1
+            elif action == DOWN:
+                nrow += 1
+            if action == DOWNLEFT:
+                nrow += 1
+                ncol -= 1
+            elif action == UPLEFT:
+                nrow -= 1
+                ncol -= 1
+            if action == UPRIGHT:
+                nrow -= 1
+                ncol += 1
+            elif action == DOWNRIGHT:
+                nrow += 1
+                ncol += 1
+        else:
+            
+            mode = 'invalid'
+        
+        # new state
+        self.state = (nrow, ncol, mode)
+        
+    def get_reward(self):
+        cursor_row, cursor_col, mode = self.state
+        nrows, ncols = self.space.shape
+        if cursor_row == nrows-1 and cursor_col == ncols-1:
+            return 50.0
+        if mode == 'blocked':
+            return self.min_reward - 1
+        if (cursor_row, cursor_col) in self.visited:
+            return -k*2
+        if mode == 'invalid':
+            return -k*2
+        if mode == 'valid' or mode == 'start':
+            return self._space[cursor_row,cursor_col]
+        
+    def act(self, action):
+        self.update_state(action)
+        reward = self.get_reward()
+        self.total_reward += reward
+        status = self.game_status()
+        envstate = self.observe()
+        return envstate, reward, status
+    
+    def observe(self):
+        canvas = self.draw_env()
+        envstate = canvas.reshape((1,-1))
+        return envstate
+    
+    def draw_env(self):
+        canvas = np.copy(self.space)
+        nrows, ncols = self.space.shape
+        # clearr the marks
+        for r in range(nrows):
+            for c in range(ncols):
+                if canvas[r,c] == 0.0:
+                    canvas[r,c] == 1.0
+        # draw the cursor
+        row, col, valid = self.state
+        canvas[row,col] = cursor_space
+        return canvas
+    
+    def game_status(self):
+        if self.total_reward < self.min_reward:
+            return 'lose'
+        cursor_row, cursor_col, mode = self.state
+        nrows, ncols = self.space.shape
+        if cursor_row == nrows-1 and cursor_col == ncols-1:
+            return 'win'
+        
+        return 'not_over'
+    
+    def valid_actions(self, cell=None):
+        if cell is None:
+            row, col, mode = self.state
+        else:
+            row, col = cell
+        actions = [0,1,2,3,4,5,6,7]
+        nrows, ncols = self.space.shape
+        
+        # Boundary Conditions
+        if row == nrows - 1 or col == ncols - 1:
+            actions.remove(7)
+        if row == 0 or col == ncols - 1:
+            actions.remove(6)
+        if row == 0 or col == 0:
+            actions.remove(5)
+        if row == nrows - 1 or col == 0:
+            actions.remove(4)
+        if row == nrows - 1:
+            actions.remove(3) 
+        if col == ncols - 1:
+            actions.remove(2)
+        if row == 0:
+            actions.remove(1)
+        if col == 0:
+            actions.remove(0)
+          
+        # Obstacle Conditions
+        if row < nrows - 1 and col < nrows - 1 and self.space[row + 1, col + 1] == 0.0:
+            actions.remove(7)
+        if row > 0 and col < ncols - 1 and self.space[row - 1, col + 1] == 0.0:
+            actions.remove(6)
+        if row > 0 and col > 0 and self.space[row - 1, col - 1] == 0.0:
+            actions.remove(5)
+        if row < nrows - 1 and col > 0 and self.space[row + 1, col - 1] == 0.0:
+            actions.remove(4)
+        if row < nrows - 1 and self.space[row + 1, col] == 0.0:
+            actions.remove(3)
+        if col < ncols - 1 and self.space[row, col + 1] == 0.0:
+            actions.remove(2)
+        if row > 0 and self.space[row - 1, col] == 0.0:
+            actions.remove(1)
+        if col > 0 and self.space[row, col - 1] == 0.0:
+            actions.remove(0)
+        
+        return actions
+       
+def show(qspace):
+    plt.grid('on')
+    nrows, ncols = qspace.space.shape
+    ax = plt.gca()
+    ax.set_xticks(np.arange(0.5, nrows, 1))
+    ax.set_yticks(np.arange(0.5, ncols, 1))
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
+    canvas = np.copy(qspace.space)
+    for row,col in qspace.visited:
+        canvas[row,col] = 0.6
+    cursor_row, cursor_col, _ = qspace.state
+    canvas[cursor_row, cursor_col] = 0.3 # cursor cell
+    canvas[nrows-1, ncols-1] = 0.9 # finish cell
+    img = plt.imshow(canvas, interpolation='none', cmap='gray')
+    return img
+    
+def play_game(model, qspace, cursor_cell):
+    qspace.reset(cursor_cell)
+    envstate = qspace.observe()
+    while True:
+        prev_envstate = envstate
+        # get next action
+        q = model.predict(prev_envstate)
+        action = np.argmax(q[0])
+        
+        # apply action, get rewards and new state
+        envstate, reward, game_status = qspace.act(action)
+        if game_status == 'win':
+            return True
+        elif game_status == 'lose':
+            return False
+
+def completion_check(model, qspace):
+    for cell in qspace.free_cells:
+        if not qspace.valid_actions(cell):
+            return False
+        if not play_game(model, qspace, cell):
+            return False
+    return True
+
+class Experience:
+    def __init__(self, model, max_memory=100, discount=0.95):
+        self.model = model
+        self.max_memory = max_memory
+        self.discount = discount
+        self.memory = list()
+        self.num_actions = model.output_shape[-1]
+        
+    def remember(self, episode):
+        self.memory.append(episode)
+        if len(self.memory) > self.max_memory:
+            del self.memory[0]
+    
+    def predict(self, envstate):
+        return self.model.predict(envstate)[0]
+    
+    def get_data(self, data_size=10):
+        env_size = self.memory[0][0].shape[1]
+        mem_size = len(self.memory)
+        data_size = min(mem_size, data_size)
+        inputs = np.zeros((data_size, env_size))
+        targets = np.zeros((data_size, self.num_actions))
+        for i, j in enumerate(np.random.choice(range(mem_size), data_size, replace = False)):
+            envstate, action, reward, envstate_next, game_over = self.memory[j]
+            inputs[i] = envstate
+            targets[i] = self.predict(envstate)
+            Q_sa = np.max(self.predict(envstate_next))
+            if game_over:
+                targets[i, action] = reward
+            else:
+                targets[i, action] = reward + self.discount * Q_sa
+        return inputs, targets  
+        
+def qtrain(model, space, **opt):
+    %matplotlib inline
+    global epsilon
+    n_epoch = opt.get('n_epoch', 15000)
+    max_memory = opt.get('max_memory', 1000)
+    data_size = opt.get('data_size', 50)
+    weights_file = opt.get('weights_file', "")
+    name = opt.get('name', 'model')
+    start_time = datetime.datetime.now()
+    
+    if weights_file:
+        print("loading weights form file: %s" % (wieghts_file,))
+        model.load_weights(weight_file)
+        
+    qspace = Qspace(space)
+    
+    experience = Experience(model, max_memory = max_memory)
+    
+    win_history = []
+    n_free_cells = len(qspace.free_cells)
+    hsize = qspace.space.size//2
+    win_rate = 0.0
+    imctr = 1
+    
+    for epoch in range(n_epoch):
+        loss = 0.0
+        cursor_cell = (0,0)
+        qspace.reset(cursor_cell)
+        game_over = False
+        
+        envstate = qspace.observe()
+        
+        n_episodes = 0
+        while not game_over:
+            valid_actions = qspace.valid_actions()
+            if not valid_actions: break
+            prev_envstate = envstate
+            if np.random.rand() < epsilon:
+                action = random.choice(valid_actions)
+            else:
+                action = np.argmax(experience.predict(prev_envstate))
+                
+            envstate, reward, game_status = qspace.act(action)
+            if game_status == 'win':
+                win_history.append(1)
+                game_over = True
+            elif game_status == 'lose':
+                win_history.append(0)
+                game_over = True
+            else:
+                game_over = False
+            
+            episode = [prev_envstate, action, reward, envstate, game_over]
+            experience.remember(episode)
+            n_episodes += 1
+            
+            inputs, targets = experience.get_data(data_size = data_size)
+            h = model.fit(inputs, targets, epochs=8, batch_size = 16, verbose = 0,)
+            loss = model.evaluate(inputs, targets, verbose=0)
+        
+        if len(win_history) > hsize:
+            win_rate = sum(win_history[-hsize:]) / hsize
+            
+        dt = datetime.datetime.now() - start_time
+        t = format_time(dt.total_seconds())
+        print(qspace.total_reward)
+        show(qspace)
+        template = "Epoch: {:03d}/{:d} | Loss: {:.4f} | Episodes: {:d} | Win count: {:d} | Win rate: {:.3f} | time: {}"
+        print(template.format(epoch, n_epoch-1, loss, n_episodes, sum(win_history), win_rate, t))
+        if win_rate > 0.9: epsilon = 0.025
+        if epoch > 300: epsilon = 0.0
+        if sum(win_history[-hsize:]) == hsize and completion_check(model, qspace):
+            print("Reached 100%% win rate at epoch: %d" % (epoch,))
+            break
+            
+    h5file = name + ".h5"
+    json_file = name + ".json"
+    model.save_weights(h5file, overwrite = True)
+    with open(json_file, "w") as outfile:
+        json.dump(model.to_json(), outfile)
+    end_time = datetime.datetime.now()
+    dt = datetime.datetime.now() - start_time
+    seconds = dt.total_seconds()
+    t = format_time(seconds)
+    print('files: %s, %s' % (h5file, json_file))
+    print("n_epoch: %d, max_mem: %d, data: %d, time: %s" % (epoch, max_memory, data_size, t))
+    return seconds
+    
+def format_time(seconds):
+    if seconds < 400:
+        s = float(seconds)
+        return "%.1f seconds" % (s,)
+    elif seconds < 4000:
+        m = seconds / 60.0
+        return "%.2f minutes" % (m,)
+    else:
+        h = seconds / 3600.0
+        return "%.2f hours" % (h,)
+
+def build_model(space, lr = 0.001):
+    model = Sequential()
+    model.add(Dense(space.size, input_shape = (space.size,)))
+    model.add(PReLU())
+    model.add(Dense(space.size))
+    model.add(PReLU())
+    model.add(Dense(num_actions))
+    model.compile(optimizer = 'adam', loss = 'mse')
+    return model
+
+model = build_model(space)
+trained = qtrain(model, space, epochs = 400, max_memory = 8*space.size, data_size = 32)
+
+newspace = Qspace(space)
+
+envstate = newspace.observe()
+action = np.argmax(model.predict(envstate))
+envstate, reward, game_status = newspace.act(action)
+print(newspace.total_reward)
+show(newspace)
+
+envstate = newspace.observe()
+action = np.argmax(model.predict(envstate))
+envstate, reward, game_status = newspace.act(action)
+print(newspace.total_reward)
+show(newspace)
